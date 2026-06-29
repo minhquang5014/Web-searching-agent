@@ -1,0 +1,5 @@
+# Local search bridge — search only (no scraping yet)
+requests>=2.31.0
+
+# Optional fallback if SearXNG is down. Not needed when SearXNG runs locally.
+# ddgs>=7.0.0

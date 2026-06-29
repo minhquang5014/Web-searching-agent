@@ -1,0 +1,11 @@
+services:
+  searxng:
+    image: ghcr.io/searxng/searxng:latest
+    container_name: searxng-bridge
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_SECRET=web-bridge-secret
+    restart: unless-stopped
