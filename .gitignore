@@ -10,3 +10,7 @@ tools/
 # Large binary assets — copy manually, don't commit
 *.dmg
 *.tar
+
+# RAG embedding model (Phase 3.5) — ~470 MB, lives on USB / copied locally, never committed
+models/
+*.safetensors

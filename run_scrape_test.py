@@ -17,6 +17,11 @@ import argparse
 import sys
 import textwrap
 
+# Windows consoles default to cp1252, which can't encode the ✅/🚫/⏱ glyphs below.
+# Force UTF-8 so the report prints on every platform.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from search import search
 from scrape import scrape, ScrapeResult
 

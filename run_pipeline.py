@@ -9,12 +9,19 @@ Usage:
     python run_pipeline.py "apple M4 benchmark" --results 10
     python run_pipeline.py "query" --results 20 --workers 8
     python run_pipeline.py "query" --raw          # dump raw text only, no headers
+    python run_pipeline.py "query" --rag          # filter to query-relevant chunks (Phase 3.5)
+    python run_pipeline.py "query" --rag --budget 2000
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+
+# Windows consoles default to cp1252, which can't encode the ✅/📄/❌ glyphs below.
+# Force UTF-8 so the report prints on every platform.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from pipeline import search_and_scrape
 
@@ -28,6 +35,10 @@ def main() -> int:
                     help="parallel scrape threads (default: 5)")
     ap.add_argument("--raw", action="store_true",
                     help="print raw combined text only — no stats header")
+    ap.add_argument("--rag", action="store_true",
+                    help="filter scraped text to query-relevant chunks (Phase 3.5)")
+    ap.add_argument("--budget", type=int, default=4000,
+                    help="--rag: max words to keep after filtering (default: 4000)")
     args = ap.parse_args()
 
     if not args.raw:
@@ -59,9 +70,24 @@ def main() -> int:
             for s in failed:
                 print(f"  [{s.rank}] {s.domain} — {s.scrape_error}")
 
+        label = "RAG-FILTERED TEXT (query-relevant chunks)" if args.rag else "COMBINED TEXT"
         print("\n" + "─" * 64)
-        print("  COMBINED TEXT")
+        print(f"  {label}")
         print("─" * 64 + "\n")
+
+    if args.rag:
+        # Lazy import: only load the embedding model (torch) when --rag is used.
+        from retrieval import select_relevant, combined_text
+        chunks = select_relevant(args.query, result.ok_sources,
+                                 max_total_words=args.budget)
+        print(combined_text(chunks))
+        if not args.raw:
+            kept = sum(c.word_count for c in chunks)
+            print(f"\n{'─'*64}")
+            print(f"  RAG kept {len(chunks)} chunks / {kept:,} words "
+                  f"(from ~{result.total_words:,} scraped) "
+                  f"across {len({c.url for c in chunks})} sources.")
+        return 0 if chunks else 1
 
     print(result.combined_text())
 
