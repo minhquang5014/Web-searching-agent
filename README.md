@@ -213,11 +213,17 @@ curl -s http://localhost:8000/health
 curl -s -X POST http://localhost:8000/search \
   -H "X-API-Key: $BRIDGE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "latest AI news", "num_results": 10}'
+  -d '{"query": "latest AI news", "num_results": 10, "rag": "auto"}'
 ```
 
-The response includes `combined_text` — trimmed, source-attributed content ready to
-drop straight into the LLM prompt on Mac #1.
+The response includes `combined_text` — source-attributed content ready to drop straight
+into the LLM prompt on Mac #1 — plus `mode` (`"raw"` or `"rag"`) showing whether relevance
+filtering kicked in. `rag` accepts `"auto"` (default), `"on"`, or `"off"`; see
+[Phase 3.5 — When to use it](#when-to-use-it--relevance-not-just-make-it-shorter).
+
+> Phase 3.5 (`rag: "on"`/`"auto"` over threshold) needs the embedding deps —
+> `pip install sentence-transformers` and the model on disk. With `rag: "off"` the
+> bridge runs without them.
 
 ---
 
@@ -234,9 +240,10 @@ If 50 is hard to reach, edit [`searxng/settings.yml`](searxng/settings.yml):
 
 ## Phase 3.5 — Relevance filtering (RAG retrieval)
 
-> **Status:** implemented in [`retrieval.py`](retrieval.py) and wired into
-> [`run_pipeline.py`](run_pipeline.py) via `--rag` for testing. Wiring it into the
-> bridge API (`POST /search`) is the remaining step.
+> **Status:** done. Lives in [`retrieval.py`](retrieval.py), testable via
+> [`run_pipeline.py`](run_pipeline.py) `--rag`, and wired into the bridge API
+> ([`bridge_api.py`](bridge_api.py) `POST /search`) with an **adaptive `rag` mode**
+> (see [When to use it](#when-to-use-it--relevance-not-just-make-it-shorter)).
 
 **The problem.** Today the bridge ([`bridge_api.py`](bridge_api.py) `_trim()`) keeps the
 **first N words** of each scraped page. But the fact the agent needs is often buried
@@ -309,13 +316,22 @@ word budget** (`--budget` here, `max_total_words` in the API) — *not* the cosm
 | **Broad / exploratory** ("everything about X", "this week's AI news") | `--rag` + large budget (4000–6000), or no RAG | Over-filtering drops relevant-but-diverse info; breadth matters more than a single focus. |
 
 Even for **detailed** answers, keep RAG **on** — it strips nav/footer/"about author"
-cruft regardless. So in production, RAG is essentially always on; **`max_total_words`
-controls detailed vs. concise**, not an on/off switch:
+cruft regardless. So `max_total_words` controls detailed vs. concise, not an on/off switch.
+
+**But don't filter tiny payloads.** A single 1,300-word article fits Qwen's 32K context
+whole, and chunking a dense page can bury the answer mid-pack (on a real test the
+exact-answer chunk ranked only #3 of 8, within a 0.04 score band of irrelevant chunks).
+So the bridge uses an **adaptive `rag` mode** on `POST /search`:
 
 ```jsonc
-{ "query": "...", "rag": true, "max_total_words": 1500 }   // concise
-{ "query": "...", "rag": true, "max_total_words": 5000 }   // detailed
+{ "query": "...", "rag": "auto" }   // default: RAG only if scraped text ≥ RAG_AUTO_THRESHOLD (6000 words)
+{ "query": "...", "rag": "on"   }   // always filter (many sources / long docs)
+{ "query": "...", "rag": "off"  }   // never filter — raw first-N-words trim
+{ "query": "...", "rag": "auto", "max_total_words": 1500 }   // concise vs. 5000 for detailed
 ```
+
+The response includes `"mode": "raw" | "rag"` so Mac #1 can see which path ran. Tune the
+auto cutoff with the `RAG_AUTO_THRESHOLD` env var.
 
 **Caveat for structured logs.** On natural-language web text, relevance scores separate
 cleanly (~0.90+). On a structured fail log they bunch up (~0.83–0.88) and exact tokens
@@ -361,10 +377,10 @@ Testing is the first phase. Once search quality is proven, we build the real sys
 - [x] **Phase 3 — HTTP API.** `search()` + scrape wrapped in a FastAPI service
       (`POST /search`, `GET /health`) with **API-key auth** via `X-API-Key`, bindable
       to the private bridge interface only. (`bridge_api.py`)
-- [ ] **Phase 3.5 — Relevance filtering (RAG retrieval).** Replace the naive
-      first-N-words trim with query-aware chunk selection: chunk each page, embed with
-      a small multilingual model, keep the top-k most relevant passages. See
-      [Phase 3.5](#phase-35--relevance-filtering-rag-retrieval-planned).
+- [x] **Phase 3.5 — Relevance filtering (RAG retrieval).** Query-aware chunk selection
+      (chunk → embed with multilingual-e5-small → keep top-k relevant passages), wired
+      into `POST /search` as an adaptive `rag` mode. (`retrieval.py`) See
+      [Phase 3.5](#phase-35--relevance-filtering-rag-retrieval).
 - [ ] **Phase 4 — Agent wiring.** On Mac #1, route the agent's `web_search` /
       `fetch_url` tools to this bridge over the Thunderbolt link.
 
@@ -374,3 +390,71 @@ Testing is the first phase. Once search quality is proven, we build the real sys
 2. **API key** on every request, checked by the bridge server.
 3. **Firewall on Mac #2:** only accept connections from `192.168.100.1` on the API port.
 4. Bridge server binds to the private bridge interface, **not** the internet-facing side.
+
+---
+
+## Future plans (dự định tương lai)
+
+Longer-horizon ideas discussed but not yet built. Recorded here so the direction
+(and the trade-offs we already reasoned through) isn't lost.
+
+### A. Adaptive query depth (extends Phase 4)
+
+Let the **agent**, not the bridge, choose how much to gather — default cheap, escalate
+only when needed. A `depth` param on `POST /search` bundling the existing levers:
+
+| `depth` | num_results | scrape | rag | budget | When |
+|---|---|---|---|---|---|
+| `instant` | 3–5 | ❌ snippets only | off | ~600 | factual lookups ("price of X", "capital of Y") |
+| `standard` (default) | 6–8 | ✅ | auto | ~2000 | normal questions |
+| `deep` | 15–20 | ✅ | on | ~5000 | "compare / analyse / explain in detail" |
+
+Qwen picks via a system-prompt hint, and **escalates progressively** (ReAct): run
+cheap first, call `deep` only if the answer is insufficient. Balance lives in the
+agent + escalation, not in a magic threshold.
+
+### B. Learning from feedback (no online RL)
+
+True RL (PPO + reward model) is **not feasible on a 24 GB Mac mini — and not needed**.
+Guiding rule: **facts → memory, behaviour → fine-tune.**
+
+1. **Feedback-memory (RAG)** — *do this first.* Store every correction / 👍👎 in a
+   vector store, retrieve relevant past feedback into the prompt at inference. Online,
+   instant, reversible, **reuses `retrieval.py` + the e5 model already on the USB**. No
+   training. Fixes most "repeated mistakes".
+2. **Periodic LoRA SFT (offline)** — once enough good/corrected examples accumulate,
+   batch-fine-tune a LoRA adapter overnight with `mlx_lm.lora` on Mac #1 (MLX supports
+   LoRA/QLoRA). For shaping *behaviour/style*, hot-swap the adapter.
+3. **DPO ("RLHF-lite")** — only if there's clear A/B preference signal; far lighter
+   than PPO (no reward model, no rollouts). MLX community trainers exist.
+
+### C. Industrial fail-log analysis
+
+Locating the failure is **not** a fine-tune problem.
+
+- **Where** the failure is → deterministic `grep`/regex (`ERROR|FAIL|exit code`,
+  timestamps, station IDs) + the hybrid keyword-prefilter → embed survivors.
+- **Why** it failed → feed the candidate region + a few labelled examples (pulled from
+  feedback-memory) to Qwen in-context. Fine-tune the domain *taxonomy* only if few-shot
+  plateaus — a fine-tuned locator goes stale when log formats / error types change.
+
+### D. Second compute node — distributed weights for bigger models (14B / 27B / 70B)
+
+Goal: run models larger than 9B by sharding across both Mac minis.
+
+- **Right-size first:** a single M4 24 GB runs **27B/32B at Q4 (~16–18 GB)** fine via
+  mlx-lm. **Distribution only pays off at 70B+** (weights exceed 24 GB). Try one Mac first.
+- **Interconnect:** use the **Thunderbolt 4 / USB4 bridge (~40 Gbps), not 1 GbE Ethernet.**
+  ⚠️ *USB-C is only the connector shape; the cable must be a certified Thunderbolt 4 /
+  USB4 cable (⚡40 marking) — a generic "Type-C" charging cable is often USB 2.0
+  (480 Mbps) and will throttle distributed inference to uselessness.* Mac mini M4 ports
+  are genuine Thunderbolt; one good cable is enough. Pipeline-parallel (transfers only a
+  small hidden-state vector per token) tolerates this well; tensor-parallel needs the
+  full bandwidth. Tools: `mlx.distributed` (MPI) or **EXO**.
+- **Security trade-off (decided: accept).** This deliberately relaxes the "dumb proxy /
+  one-way link" rules above. **The one rule that must still hold:** Mac #2 (internet-facing)
+  must have **no route into corporate `10.52`** — keep **IP forwarding OFF on both Macs**,
+  the Thunderbolt link an isolated `192.168.100.0/24` inference-only channel, and firewall
+  it to just the MPI/inference ports between `.1`↔`.2`. Caveat: MPI has **no auth and
+  trusts peers**, so a compromised Mac #2 could poke Mac #1's inference endpoint — keep the
+  channel isolated and minimise Mac #2's internet-facing surface.

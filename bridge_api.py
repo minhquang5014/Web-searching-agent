@@ -6,8 +6,12 @@ Mac #2 searches the web, scrapes pages, trims content, and returns a clean
 text block the LLM can use directly as context.
 
 Endpoints:
-    POST /search   — search + scrape + trim → JSON + combined_text
+    POST /search   — search + scrape + (adaptive RAG) trim → JSON + combined_text
     GET  /health   — liveness check (no auth required)
+
+Relevance filtering (Phase 3.5): `rag` = "auto" (default) only embeds-and-ranks
+when the scraped text is large enough to be worth filtering; "on" always filters;
+"off" keeps the raw first-N-words trim. See retrieval.py.
 
 Auth: every /search request must include header  X-API-Key: <BRIDGE_API_KEY>
 
@@ -24,7 +28,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Optional
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Security
 from fastapi.security.api_key import APIKeyHeader
@@ -40,6 +44,12 @@ BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY", "")
 _MAX_WORDS_PER_SOURCE = int(os.getenv("MAX_WORDS_PER_SOURCE", "400"))
 _MAX_TOTAL_WORDS      = int(os.getenv("MAX_TOTAL_WORDS", "4000"))
 _DEFAULT_RESULTS      = int(os.getenv("DEFAULT_RESULTS", "10"))
+
+# RAG relevance filtering (Phase 3.5). In "auto" mode we only embed-and-rank when
+# the raw scraped text is large enough to be worth filtering — small payloads
+# (one/a few short articles) fit Qwen's context fine, and chunking them risks
+# dropping the exact answer (a single passage can rank mid-pack on a dense page).
+_RAG_AUTO_THRESHOLD = int(os.getenv("RAG_AUTO_THRESHOLD", "6000"))   # words
 
 # ── Auth ──────────────────────────────────────────────────────────────
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -57,6 +67,9 @@ class SearchRequest(BaseModel):
     num_results: int = Field(default=_DEFAULT_RESULTS, ge=1, le=20)
     words_per_source: int = Field(default=_MAX_WORDS_PER_SOURCE, ge=50, le=2000)
     max_total_words: int = Field(default=_MAX_TOTAL_WORDS, ge=200, le=20000)
+    # "auto" → RAG-filter only when scraped text exceeds RAG_AUTO_THRESHOLD words.
+    # "on"   → always RAG-filter.  "off" → always raw first-N-words trim.
+    rag: Literal["auto", "on", "off"] = "auto"
 
 class SourceItem(BaseModel):
     rank: int
@@ -69,6 +82,7 @@ class SourceItem(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     backend: str
+    mode: str                   # "raw" or "rag" — how combined_text was built
     sources_found: int
     sources_with_content: int
     total_words: int
@@ -119,18 +133,48 @@ def _trim(result: PipelineResult,
     return items, "\n\n".join(parts)
 
 
+def _rag_select(query: str,
+                result: PipelineResult,
+                max_total_words: int) -> tuple[list[SourceItem], str]:
+    """
+    Query-aware filtering (Phase 3.5): chunk every source, rank chunks by
+    relevance to `query`, keep the best up to the word budget. Returns the same
+    (items, combined_text) shape as `_trim`, with one SourceItem per source
+    (word_count = total kept words from that source).
+
+    `retrieval` (and torch) is imported lazily so the bridge starts fast and the
+    embedding model only loads when RAG is actually used.
+    """
+    from retrieval import select_relevant, combined_text
+
+    chunks = select_relevant(query, result.ok_sources, max_total_words=max_total_words)
+
+    by_url: dict[str, SourceItem] = {}
+    for c in chunks:
+        item = by_url.get(c.url)
+        if item is None:
+            by_url[c.url] = SourceItem(
+                rank=c.rank, title=c.title, url=c.url, domain=c.domain,
+                word_count=c.word_count, scrape_ok=True,
+            )
+        else:
+            item.word_count += c.word_count
+
+    return list(by_url.values()), combined_text(chunks)
+
+
 # ── App ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Web Bridge API",
-    description="Search + scrape proxy for air-gapped LLM agent on Mac #1.",
-    version="0.3.0",
+    description="Search + scrape (+ adaptive RAG) proxy for air-gapped LLM agent on Mac #1.",
+    version="0.3.5",
 )
 
 
 @app.get("/health")
 def health():
     """Liveness check — no auth required. Mac #1 can ping this to confirm the bridge is up."""
-    return {"status": "ok", "bridge": "web-search-bridge v0.3"}
+    return {"status": "ok", "bridge": "web-search-bridge v0.3.5"}
 
 
 @app.post("/search", response_model=SearchResponse)
@@ -141,17 +185,34 @@ def search(req: SearchRequest, _key: str = Security(_require_key)):
     Mac #1 calls:
         POST http://192.168.100.2:8000/search
         Headers: X-API-Key: <BRIDGE_API_KEY>
-        Body:    {"query": "AI news today", "num_results": 10}
+        Body:    {"query": "AI news today", "num_results": 10, "rag": "auto"}
+
+    rag = "auto" (default) filters by relevance only when the scraped text is
+    large enough to need it; "on" always filters; "off" keeps the raw trim.
 
     Returns combined_text — inject this directly into the LLM prompt as context.
     """
     t0 = time.time()
     result = search_and_scrape(req.query, req.num_results)
-    items, combined = _trim(result, req.words_per_source, req.max_total_words)
+
+    # Decide raw-trim vs RAG relevance filtering. Small payloads fit Qwen's
+    # context as-is, and chunking a single dense page can bury the answer —
+    # so "auto" only filters once the raw text crosses the threshold.
+    use_rag = req.rag == "on" or (
+        req.rag == "auto" and result.total_words >= _RAG_AUTO_THRESHOLD
+    )
+
+    if use_rag:
+        items, combined = _rag_select(req.query, result, req.max_total_words)
+        mode = "rag"
+    else:
+        items, combined = _trim(result, req.words_per_source, req.max_total_words)
+        mode = "raw"
 
     return SearchResponse(
         query=req.query,
         backend=result.search_backend,
+        mode=mode,
         sources_found=len(result.sources),
         sources_with_content=len(items),
         total_words=sum(i.word_count for i in items),

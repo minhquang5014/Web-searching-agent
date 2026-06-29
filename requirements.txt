@@ -9,9 +9,10 @@ lxml>=5.0.0
 fastapi>=0.100.0
 uvicorn>=0.23.0
 
-# Relevance filtering / RAG retrieval (Phase 3.5) — uncomment when implementing.
+# Relevance filtering / RAG retrieval (Phase 3.5).
+# Required for rag="on"/"auto" (lazy-imported, so rag="off" runs without it).
 # Embeds query + page chunks with multilingual-e5-small (~470 MB, supports Vietnamese).
-# sentence-transformers>=3.0.0      # reliable, MPS-accelerated on Apple Silicon (pulls torch)
+sentence-transformers>=3.0.0        # reliable, MPS-accelerated on Apple Silicon (pulls torch)
 # fastembed>=0.3.0                  # lighter alternative: ONNX/CPU, no torch
 
 # Optional fallback if SearXNG is down. Not needed when SearXNG runs locally.
