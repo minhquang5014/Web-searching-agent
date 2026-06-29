@@ -1,0 +1,9 @@
+# Search
+requests>=2.31.0
+
+# Scraping (Phase 2)
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# Optional fallback if SearXNG is down. Not needed when SearXNG runs locally.
+# ddgs>=7.0.0

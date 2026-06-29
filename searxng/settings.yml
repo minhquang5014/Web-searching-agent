@@ -1,0 +1,70 @@
+# SearXNG settings for the web-search bridge (Mac #2).
+# Tuned for BREADTH — more engines enabled so the algorithm can collect
+# 10 / 20 / 50 distinct sources by paginating across them.
+# Full reference: https://docs.searxng.org/admin/settings/index.html
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Web Bridge Search"
+
+search:
+  # JSON format is required by search.py
+  formats:
+    - html
+    - json
+  # Return more results per page so fewer paginations are needed.
+  default_lang: "en"
+
+server:
+  bind_address: "0.0.0.0"     # so the bridge host (and Mac #1 later) can reach it
+  secret_key: "web-bridge-secret"
+  limiter: false              # disable rate limiting for local/dedicated use
+  public_instance: false
+
+ui:
+  default_locale: "en"
+  default_theme: simple
+
+# Broad general-web engine set — diversity is what lets us reach 50 sources.
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+
+  - name: bing
+    engine: bing
+    shortcut: b
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: d
+
+  - name: brave
+    engine: brave
+    shortcut: br
+
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+
+  - name: mojeek
+    engine: mojeek
+    shortcut: mj
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: w
+    categories: general
+
+outgoing:
+  request_timeout: 10.0
+  # Parallel requests to upstream engines — keeps multi-engine search fast.
+  pool_connections: 100
+  pool_maxsize: 20
+  useragent_suffix: ""

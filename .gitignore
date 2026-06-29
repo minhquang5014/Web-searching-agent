@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.log
+.DS_Store
+tools/
+
+# Large binary assets — copy manually, don't commit
+*.dmg
+*.tar
