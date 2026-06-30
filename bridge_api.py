@@ -91,6 +91,22 @@ class SearchResponse(BaseModel):
     combined_text: str          # ready to inject into LLM context
 
 
+class ScrapeRequest(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2000)
+    max_words: int = Field(default=2000, ge=50, le=8000)
+
+
+class ScrapeResponse(BaseModel):
+    url: str
+    title: str
+    domain: str
+    word_count: int             # full extracted word count before truncation
+    truncated: bool
+    elapsed_s: float
+    text: str
+    error: str = ""
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 def _trim(result: PipelineResult,
           words_per_source: int,
@@ -219,4 +235,35 @@ def search(req: SearchRequest, _key: str = Security(_require_key)):
         elapsed_s=round(time.time() - t0, 2),
         sources=items,
         combined_text=combined,
+    )
+
+
+@app.post("/scrape", response_model=ScrapeResponse)
+def scrape_endpoint(req: ScrapeRequest, _key: str = Security(_require_key)):
+    """
+    Scrape a single PUBLIC url and return its cleaned readable text.
+
+    Mac #1's fetch_url tool calls this for public pages (internal 10.52 URLs are
+    fetched locally on Mac #1 and never reach this bridge).
+
+        POST http://192.168.100.2:8000/scrape
+        Headers: X-API-Key: <BRIDGE_API_KEY>
+        Body:    {"url": "https://example.com/article", "max_words": 2000}
+    """
+    from scrape import scrape as scrape_url
+
+    r = scrape_url(req.url)
+    words = r.text.split()
+    truncated = len(words) > req.max_words
+    text = " ".join(words[:req.max_words]) if truncated else r.text
+
+    return ScrapeResponse(
+        url=r.url,
+        title=r.title,
+        domain=r.domain,
+        word_count=r.word_count,
+        truncated=truncated,
+        elapsed_s=round(r.elapsed_s, 2),
+        text=text,
+        error=r.error,
     )
